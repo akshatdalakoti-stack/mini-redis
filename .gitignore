@@ -1,0 +1,5 @@
+mini-redis.exe
+mini-redis
+*.exe
+*.test
+*.out
