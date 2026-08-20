@@ -20,6 +20,8 @@ and key expiry.
   background goroutine sweeps expired keys every second)
 - Concurrent clients, each handled in its own goroutine
 - Graceful shutdown on Ctrl+C
+- Connect/disconnect logging per client, and a recovered panic in one
+  connection's handler won't take down the other clients or the server
 
 ## Running it
 

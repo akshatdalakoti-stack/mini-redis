@@ -3,7 +3,9 @@ package main
 import (
 	"bufio"
 	"context"
-	"fmt"
+	"errors"
+	"io"
+	"log"
 	"net"
 	"sync"
 )
@@ -18,7 +20,7 @@ func RunServer(ctx context.Context, store *Store, address string) error {
 	}
 	defer listener.Close()
 
-	fmt.Println("mini-redis listening on", address)
+	log.Println("mini-redis listening on", address)
 
 	var wg sync.WaitGroup
 
@@ -35,8 +37,17 @@ func RunServer(ctx context.Context, store *Store, address string) error {
 				wg.Wait()
 				return nil
 			default:
-				return err
 			}
+
+			// A temporary network error (e.g. too many open files)
+			// shouldn't take the whole server down; log it and keep
+			// accepting new connections.
+			var netErr net.Error
+			if errors.As(err, &netErr) && netErr.Timeout() {
+				log.Println("accept error (temporary):", err)
+				continue
+			}
+			return err
 		}
 
 		wg.Add(1)
@@ -48,7 +59,16 @@ func RunServer(ctx context.Context, store *Store, address string) error {
 }
 
 func handleConnection(store *Store, conn net.Conn) {
-	defer conn.Close()
+	remote := conn.RemoteAddr()
+	log.Println("client connected:", remote)
+	defer func() {
+		conn.Close()
+		if r := recover(); r != nil {
+			log.Println("client", remote, "crashed the handler, recovered:", r)
+			return
+		}
+		log.Println("client disconnected:", remote)
+	}()
 
 	reader := bufio.NewReader(conn)
 	writer := bufio.NewWriter(conn)
@@ -56,6 +76,9 @@ func handleConnection(store *Store, conn net.Conn) {
 	for {
 		args, err := readCommand(reader)
 		if err != nil {
+			if !errors.Is(err, io.EOF) {
+				log.Println("client", remote, "read error:", err)
+			}
 			return
 		}
 		if len(args) == 0 {
