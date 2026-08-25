@@ -10,6 +10,27 @@ import (
 	"sync"
 )
 
+// bumped these up from the bufio defaults (4096) since redis commands can
+// come in bursts and bigger buffers = less syscalls = faster
+const (
+	readBufSize  = 16 * 1024
+	writeBufSize = 16 * 1024
+)
+
+// reusing the reader/writer structs instead of making new ones every time
+// a client connects, saves on garbage collector having to clean up so much
+var readerPool = sync.Pool{
+	New: func() any {
+		return bufio.NewReaderSize(nil, readBufSize)
+	},
+}
+
+var writerPool = sync.Pool{
+	New: func() any {
+		return bufio.NewWriterSize(nil, writeBufSize)
+	},
+}
+
 // RunServer opens the TCP listener and accepts clients until ctx is
 // cancelled. Each client gets its own goroutine so multiple redis-cli
 // sessions can talk to the server at the same time.
@@ -70,8 +91,21 @@ func handleConnection(store *Store, conn net.Conn) {
 		log.Println("client disconnected:", remote)
 	}()
 
-	reader := bufio.NewReader(conn)
-	writer := bufio.NewWriter(conn)
+	// turn off nagle's algorithm so single commands go out right away
+	// instead of waiting around to see if more data is coming
+	if tcpConn, ok := conn.(*net.TCPConn); ok {
+		tcpConn.SetNoDelay(true)
+	}
+
+	// grab a reader/writer from the pool instead of allocating new ones,
+	// then give them back when this client leaves
+	reader := readerPool.Get().(*bufio.Reader)
+	reader.Reset(conn)
+	defer readerPool.Put(reader)
+
+	writer := writerPool.Get().(*bufio.Writer)
+	writer.Reset(conn)
+	defer writerPool.Put(writer)
 
 	for {
 		args, err := readCommand(reader)
