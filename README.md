@@ -22,6 +22,9 @@ and key expiry.
 - Graceful shutdown on Ctrl+C
 - Connect/disconnect logging per client, and a recovered panic in one
   connection's handler won't take down the other clients or the server
+- A few connection-level perf tweaks: pooled reader/writer buffers per
+  client (fewer allocations) and `TCP_NODELAY` turned on so small commands
+  aren't held up by Nagle's algorithm
 
 ## Running it
 
