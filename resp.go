@@ -3,8 +3,18 @@ package main
 import (
 	"bufio"
 	"errors"
+	"io"
 	"strconv"
 	"strings"
+)
+
+// maxArrayLen / maxBulkLen cap the sizes we're willing to allocate off a
+// single length header. A broken or malicious client sending "*99999999"
+// or "$99999999" shouldn't be able to make us reserve gigabytes before a
+// single byte of payload has arrived.
+const (
+	maxArrayLen = 1 << 20
+	maxBulkLen  = 512 * 1024 * 1024
 )
 
 // readCommand reads one RESP command from the client and returns it as a
@@ -23,11 +33,13 @@ func readCommand(reader *bufio.Reader) ([]string, error) {
 	}
 
 	if line[0] != '*' {
-		return strings.Fields(line), nil
+		// inline command: rare path (telnet/nc), so the string copy that
+		// strings.Fields needs is not worth optimising away.
+		return strings.Fields(string(line)), nil
 	}
 
-	count, err := strconv.Atoi(line[1:])
-	if err != nil {
+	count, err := atoiBytes(line[1:])
+	if err != nil || count < 0 || count > maxArrayLen {
 		return nil, errors.New("invalid array length")
 	}
 
@@ -41,43 +53,72 @@ func readCommand(reader *bufio.Reader) ([]string, error) {
 			return nil, errors.New("expected bulk string")
 		}
 
-		bulkLen, err := strconv.Atoi(bulkHeader[1:])
-		if err != nil {
+		bulkLen, err := atoiBytes(bulkHeader[1:])
+		if err != nil || bulkLen < 0 || bulkLen > maxBulkLen {
 			return nil, errors.New("invalid bulk length")
 		}
 
-		data := make([]byte, bulkLen+2) // +2 for the trailing \r\n
-		_, err = readFull(reader, data)
-		if err != nil {
+		// allocate exactly the payload size (no +2 slack) and read it in
+		// one shot, then skip the trailing \r\n without copying it.
+		data := make([]byte, bulkLen)
+		if _, err := io.ReadFull(reader, data); err != nil {
+			return nil, err
+		}
+		if _, err := reader.Discard(2); err != nil {
 			return nil, err
 		}
 
-		args = append(args, string(data[:bulkLen]))
+		args = append(args, string(data))
 	}
 
 	return args, nil
 }
 
-// readLine reads until \r\n and strips it off
-func readLine(reader *bufio.Reader) (string, error) {
-	line, err := reader.ReadString('\n')
-	if err != nil {
-		return "", err
+// readLine reads one \r\n-terminated line and returns it without the
+// terminator. The result aliases the reader's internal buffer and is only
+// valid until the next read from reader, so callers must copy anything they
+// need to keep. Using ReadSlice here avoids the two allocations that
+// ReadString + strings.TrimRight cost on every header line.
+func readLine(reader *bufio.Reader) ([]byte, error) {
+	line, err := reader.ReadSlice('\n')
+	if err == nil {
+		return trimCRLF(line), nil
 	}
-	line = strings.TrimRight(line, "\r\n")
-	return line, nil
+	if errors.Is(err, bufio.ErrBufferFull) {
+		// Line longer than the buffer, e.g. a giant inline command. Fall
+		// back to the allocating path; RESP headers never hit this.
+		buf := append([]byte(nil), line...)
+		rest, err := reader.ReadBytes('\n')
+		if err != nil {
+			return nil, err
+		}
+		return trimCRLF(append(buf, rest...)), nil
+	}
+	return nil, err
 }
 
-func readFull(reader *bufio.Reader, buf []byte) (int, error) {
-	total := 0
-	for total < len(buf) {
-		n, err := reader.Read(buf[total:])
-		total += n
-		if err != nil {
-			return total, err
-		}
+func trimCRLF(b []byte) []byte {
+	for len(b) > 0 && (b[len(b)-1] == '\r' || b[len(b)-1] == '\n') {
+		b = b[:len(b)-1]
 	}
-	return total, nil
+	return b
+}
+
+// atoiBytes parses a non-negative base-10 integer straight out of b,
+// skipping the string allocation that strconv.Atoi(string(b)) would incur
+// on every array and bulk header.
+func atoiBytes(b []byte) (int, error) {
+	if len(b) == 0 || len(b) > 18 { // 18 digits stays well inside int64
+		return 0, errors.New("invalid integer")
+	}
+	n := 0
+	for _, c := range b {
+		if c < '0' || c > '9' {
+			return 0, errors.New("invalid integer")
+		}
+		n = n*10 + int(c-'0')
+	}
+	return n, nil
 }
 
 // everything below here writes RESP replies back to the client.
