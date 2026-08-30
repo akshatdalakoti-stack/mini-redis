@@ -25,6 +25,11 @@ and key expiry.
 - A few connection-level perf tweaks: pooled reader/writer buffers per
   client (fewer allocations) and `TCP_NODELAY` turned on so small commands
   aren't held up by Nagle's algorithm
+- Replies are buffered and flushed once per read batch, so a pipeline of N
+  commands comes back in a single write syscall; RESP replies are also
+  assembled without per-reply string allocations
+- `GET` takes only a read lock on the happy path, so concurrent reads don't
+  serialize against each other
 
 ## Running it
 

@@ -44,20 +44,28 @@ func (s *Store) SetWithTTL(key string, value string, seconds int) {
 }
 
 func (s *Store) Get(key string) (string, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
+	// fast path: a read lock is enough for the common case (key present and
+	// not expired), so concurrent GETs don't serialize on each other.
+	s.mu.RLock()
 	e, ok := s.data[key]
+	expired := ok && e.hasTTL && time.Now().After(e.expires)
+	s.mu.RUnlock()
+
 	if !ok {
 		return "", false
 	}
-
-	if e.hasTTL && time.Now().After(e.expires) {
-		delete(s.data, key)
-		return "", false
+	if !expired {
+		return e.value, true
 	}
 
-	return e.value, true
+	// slow path: key expired, take the write lock to evict it. Re-check
+	// under the lock in case another goroutine already replaced it.
+	s.mu.Lock()
+	if e, ok := s.data[key]; ok && e.hasTTL && time.Now().After(e.expires) {
+		delete(s.data, key)
+	}
+	s.mu.Unlock()
+	return "", false
 }
 
 func (s *Store) Del(keys []string) int {

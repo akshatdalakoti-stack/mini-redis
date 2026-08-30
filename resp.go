@@ -80,44 +80,65 @@ func readFull(reader *bufio.Reader, buf []byte) (int, error) {
 	return total, nil
 }
 
-// everything below here writes RESP replies back to the client
+// everything below here writes RESP replies back to the client.
+//
+// none of these flush: handleConnection flushes once per read batch, so a
+// pipeline of N commands turns into a single write() syscall instead of N.
+// building each reply with separate WriteString/WriteByte calls also avoids
+// the throwaway string that "+" + s + "\r\n" would allocate on every reply.
+
+const crlf = "\r\n"
+
+func writeCRLF(writer *bufio.Writer) {
+	writer.WriteString(crlf)
+}
 
 func writeSimpleString(writer *bufio.Writer, s string) {
-	writer.WriteString("+" + s + "\r\n")
-	writer.Flush()
+	writer.WriteByte('+')
+	writer.WriteString(s)
+	writeCRLF(writer)
 }
 
 func writeError(writer *bufio.Writer, s string) {
-	writer.WriteString("-" + s + "\r\n")
-	writer.Flush()
+	writer.WriteByte('-')
+	writer.WriteString(s)
+	writeCRLF(writer)
 }
 
 func writeInteger(writer *bufio.Writer, n int) {
-	writer.WriteString(":" + strconv.Itoa(n) + "\r\n")
-	writer.Flush()
+	writer.WriteByte(':')
+	writeInt(writer, n)
+	writeCRLF(writer)
 }
 
 func writeBulkString(writer *bufio.Writer, s string) {
-	writer.WriteString("$" + strconv.Itoa(len(s)) + "\r\n")
-	writer.WriteString(s + "\r\n")
-	writer.Flush()
+	writer.WriteByte('$')
+	writeInt(writer, len(s))
+	writeCRLF(writer)
+	writer.WriteString(s)
+	writeCRLF(writer)
 }
 
 func writeNullBulkString(writer *bufio.Writer) {
 	writer.WriteString("$-1\r\n")
-	writer.Flush()
 }
 
 func writeArray(writer *bufio.Writer, items []string) {
-	writer.WriteString("*" + strconv.Itoa(len(items)) + "\r\n")
+	writer.WriteByte('*')
+	writeInt(writer, len(items))
+	writeCRLF(writer)
 	for _, item := range items {
-		writer.WriteString("$" + strconv.Itoa(len(item)) + "\r\n")
-		writer.WriteString(item + "\r\n")
+		writeBulkString(writer, item)
 	}
-	writer.Flush()
 }
 
 func writeEmptyArray(writer *bufio.Writer) {
 	writer.WriteString("*0\r\n")
-	writer.Flush()
+}
+
+// writeInt writes n in base 10 without allocating a string (strconv.Itoa
+// would). The scratch array lives on the stack.
+func writeInt(writer *bufio.Writer, n int) {
+	var buf [20]byte
+	writer.Write(strconv.AppendInt(buf[:0], int64(n), 10))
 }

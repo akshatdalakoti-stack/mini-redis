@@ -115,9 +115,19 @@ func handleConnection(store *Store, conn net.Conn) {
 			}
 			return
 		}
-		if len(args) == 0 {
-			continue
+		if len(args) != 0 {
+			handleCommand(store, writer, args)
 		}
-		handleCommand(store, writer, args)
+
+		// only flush once we've drained everything the client already sent.
+		// for a normal request/reply client that's every command; for a
+		// pipelined client it collapses a whole batch of replies into one
+		// write syscall.
+		if reader.Buffered() == 0 {
+			if err := writer.Flush(); err != nil {
+				log.Println("client", remote, "write error:", err)
+				return
+			}
+		}
 	}
 }
