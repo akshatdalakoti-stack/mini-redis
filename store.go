@@ -7,11 +7,24 @@ import (
 	"time"
 )
 
-// entry is one value in the store, plus its optional expiry time
+// entry is one value in the store, plus its optional expiry.
+//
+// expireAt is a Unix-nanosecond deadline, with 0 meaning "no TTL". Storing
+// the deadline as an int64 instead of a time.Time + bool keeps entry small
+// (16 bytes of payload vs 32) and turns every expiry check into a plain
+// integer compare, which matters on the hot Get path.
 type entry struct {
-	value   string
-	expires time.Time
-	hasTTL  bool
+	value    string
+	expireAt int64
+}
+
+func (e entry) expired(nowNanos int64) bool {
+	return e.expireAt != 0 && nowNanos > e.expireAt
+}
+
+// deadline converts a TTL in seconds to an absolute Unix-nanosecond stamp.
+func deadline(seconds int) int64 {
+	return time.Now().Add(time.Duration(seconds) * time.Second).UnixNano()
 }
 
 // Store is our in-memory key-value database. All access goes through
@@ -36,32 +49,28 @@ func (s *Store) Set(key string, value string) {
 func (s *Store) SetWithTTL(key string, value string, seconds int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.data[key] = entry{
-		value:   value,
-		expires: time.Now().Add(time.Duration(seconds) * time.Second),
-		hasTTL:  true,
-	}
+	s.data[key] = entry{value: value, expireAt: deadline(seconds)}
 }
 
 func (s *Store) Get(key string) (string, bool) {
 	// fast path: a read lock is enough for the common case (key present and
 	// not expired), so concurrent GETs don't serialize on each other.
+	now := time.Now().UnixNano()
 	s.mu.RLock()
 	e, ok := s.data[key]
-	expired := ok && e.hasTTL && time.Now().After(e.expires)
 	s.mu.RUnlock()
 
 	if !ok {
 		return "", false
 	}
-	if !expired {
+	if !e.expired(now) {
 		return e.value, true
 	}
 
 	// slow path: key expired, take the write lock to evict it. Re-check
 	// under the lock in case another goroutine already replaced it.
 	s.mu.Lock()
-	if e, ok := s.data[key]; ok && e.hasTTL && time.Now().After(e.expires) {
+	if e, ok := s.data[key]; ok && e.expired(time.Now().UnixNano()) {
 		delete(s.data, key)
 	}
 	s.mu.Unlock()
@@ -86,13 +95,14 @@ func (s *Store) Exists(keys []string) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	now := time.Now().UnixNano()
 	count := 0
 	for _, key := range keys {
 		e, ok := s.data[key]
 		if !ok {
 			continue
 		}
-		if e.hasTTL && time.Now().After(e.expires) {
+		if e.expired(now) {
 			delete(s.data, key)
 			continue
 		}
@@ -105,10 +115,10 @@ func (s *Store) Keys() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	now := time.Now()
+	now := time.Now().UnixNano()
 	keys := make([]string, 0, len(s.data))
 	for k, e := range s.data {
-		if e.hasTTL && now.After(e.expires) {
+		if e.expired(now) {
 			delete(s.data, k)
 			continue
 		}
@@ -127,16 +137,17 @@ func (s *Store) TTL(key string) int {
 		return -2
 	}
 
-	if !e.hasTTL {
+	if e.expireAt == 0 {
 		return -1
 	}
 
-	if time.Now().After(e.expires) {
+	now := time.Now().UnixNano()
+	if now > e.expireAt {
 		delete(s.data, key)
 		return -2
 	}
 
-	left := time.Until(e.expires).Seconds()
+	left := time.Duration(e.expireAt - now).Seconds()
 	if left < 0 {
 		left = 0
 	}
@@ -152,13 +163,12 @@ func (s *Store) Expire(key string, seconds int) int {
 	if !ok {
 		return 0
 	}
-	if e.hasTTL && time.Now().After(e.expires) {
+	if e.expired(time.Now().UnixNano()) {
 		delete(s.data, key)
 		return 0
 	}
 
-	e.hasTTL = true
-	e.expires = time.Now().Add(time.Duration(seconds) * time.Second)
+	e.expireAt = deadline(seconds)
 	s.data[key] = e
 	return 1
 }
@@ -177,7 +187,7 @@ func (s *Store) addTo(key string, amount int) (int, error) {
 	defer s.mu.Unlock()
 
 	e, ok := s.data[key]
-	if ok && e.hasTTL && time.Now().After(e.expires) {
+	if ok && e.expired(time.Now().UnixNano()) {
 		ok = false
 	}
 
@@ -192,9 +202,8 @@ func (s *Store) addTo(key string, amount int) (int, error) {
 
 	current += amount
 	newValue := entry{value: strconv.Itoa(current)}
-	if ok && e.hasTTL {
-		newValue.hasTTL = true
-		newValue.expires = e.expires
+	if ok {
+		newValue.expireAt = e.expireAt
 	}
 	s.data[key] = newValue
 
@@ -208,9 +217,9 @@ func (s *Store) sweepExpired() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	now := time.Now()
+	now := time.Now().UnixNano()
 	for k, e := range s.data {
-		if e.hasTTL && now.After(e.expires) {
+		if e.expired(now) {
 			delete(s.data, k)
 		}
 	}
