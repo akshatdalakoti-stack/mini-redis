@@ -4,44 +4,64 @@ import (
 	"bufio"
 	"path/filepath"
 	"strconv"
-	"strings"
 )
 
+// asciiEqualFold reports whether s equals upper (an ASCII-uppercase
+// literal) ignoring case. Unlike strings.ToUpper it never allocates, so
+// it's safe to call on every command in the dispatch hot path.
+func asciiEqualFold(s, upper string) bool {
+	if len(s) != len(upper) {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= 'a' && c <= 'z' {
+			c -= 32
+		}
+		if c != upper[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // handleCommand looks at the first word of args and runs whatever it
-// matches. Everything gets uppercased first since Redis commands are
-// case-insensitive (get, GET, GeT all work).
+// matches. Matching is ASCII case-insensitive since Redis commands are
+// case-insensitive (get, GET, GeT all work). The hottest commands are
+// checked first.
 func handleCommand(store *Store, writer *bufio.Writer, args []string) {
 	if len(args) == 0 {
 		return
 	}
 
-	cmd := strings.ToUpper(args[0])
+	cmd := args[0]
 
-	if cmd == "PING" {
-		handlePing(writer, args)
-	} else if cmd == "ECHO" {
-		handleEcho(writer, args)
-	} else if cmd == "SET" {
-		handleSet(store, writer, args)
-	} else if cmd == "GET" {
+	switch {
+	case asciiEqualFold(cmd, "GET"):
 		handleGet(store, writer, args)
-	} else if cmd == "DEL" {
+	case asciiEqualFold(cmd, "SET"):
+		handleSet(store, writer, args)
+	case asciiEqualFold(cmd, "DEL"):
 		handleDel(store, writer, args)
-	} else if cmd == "EXISTS" {
+	case asciiEqualFold(cmd, "PING"):
+		handlePing(writer, args)
+	case asciiEqualFold(cmd, "ECHO"):
+		handleEcho(writer, args)
+	case asciiEqualFold(cmd, "EXISTS"):
 		handleExists(store, writer, args)
-	} else if cmd == "KEYS" {
+	case asciiEqualFold(cmd, "KEYS"):
 		handleKeys(store, writer, args)
-	} else if cmd == "TTL" {
+	case asciiEqualFold(cmd, "TTL"):
 		handleTTL(store, writer, args)
-	} else if cmd == "EXPIRE" {
+	case asciiEqualFold(cmd, "EXPIRE"):
 		handleExpire(store, writer, args)
-	} else if cmd == "INCR" {
+	case asciiEqualFold(cmd, "INCR"):
 		handleIncr(store, writer, args)
-	} else if cmd == "DECR" {
+	case asciiEqualFold(cmd, "DECR"):
 		handleDecr(store, writer, args)
-	} else if cmd == "COMMAND" {
+	case asciiEqualFold(cmd, "COMMAND"):
 		handleCommandDocs(writer, args)
-	} else {
+	default:
 		writeError(writer, "ERR unknown command '"+args[0]+"'")
 	}
 }
@@ -71,7 +91,7 @@ func handleSet(store *Store, writer *bufio.Writer, args []string) {
 		return
 	}
 
-	if len(args) == 5 && strings.ToUpper(args[3]) == "EX" {
+	if len(args) == 5 && asciiEqualFold(args[3], "EX") {
 		seconds, err := strconv.Atoi(args[4])
 		if err != nil || seconds <= 0 {
 			writeError(writer, "ERR invalid expire time in 'set' command")
