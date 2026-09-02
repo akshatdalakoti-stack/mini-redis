@@ -8,6 +8,17 @@ This was built as a learning project to understand how Redis works under
 the hood: TCP servers, the RESP wire protocol, concurrency with goroutines,
 and key expiry.
 
+## Screenshots
+
+A `redis-cli` session running against mini-redis:
+
+![redis-cli session against mini-redis](docs/redis-cli-session.png)
+
+The server side, logging each client connect/disconnect and shutting down
+cleanly on Ctrl+C:
+
+![mini-redis server log](docs/server-log.png)
+
 ## What it supports
 
 - `PING`, `ECHO`
